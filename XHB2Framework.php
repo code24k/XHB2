@@ -27,6 +27,7 @@ $GLOBALS["XHB2"]["SessionValidity"] = 40;
 $GLOBALS["XHB2"]["SessionID"] = md5($GLOBALS["XHB2"]["RootPath"]);
 $GLOBALS["XHB2"]["ConfigPath"] = $GLOBALS["XHB2"]["RootPath"]."/App/Config";
 $GLOBALS["XHB2"]["TranslatePath"] = $GLOBALS["XHB2"]["RootPath"]."/App/Translate";
+$GLOBALS["XHB2"]["DefaultLanguage"] = "English";
 
 if (!function_exists("StatusSuccess")) {
     function StatusSuccess($message = "success", $data = []) {
@@ -75,6 +76,11 @@ if (!function_exists("URL")) {
             return "/?{$language}-{$path}";
         }
         return "/";
+    }
+}
+if (!function_exists("PublicPath")) {
+    function PublicPath(){
+        return $GLOBALS["XHB2"]["RootPath"] . "/Public";
     }
 }
 if (!function_exists("TranslatePath")) {
@@ -238,8 +244,14 @@ class Request {
     public $m_Translate;
 
     public function __construct(){
-        $config = Config("Translate");
-        $this->m_Translate = $config["Default"] ? $config["Default"] : "en";
+        $urlQuery = parse_url($this->GetCurrentUrl(), PHP_URL_QUERY);
+        $urlArray = explode("-", $urlQuery);
+        if(!is_array($urlArray) || count($urlArray) < 4){
+            $config = Config("Translate");
+            $this->m_Translate = $config["Default"] ? $config["Default"] : "English";
+        }else{
+            $this->m_Translate = $urlArray[0];
+        }        
     }
 
     public static function Instance(){
@@ -364,6 +376,19 @@ class Request {
         }
         return "{$scheme}{$host}{$path}?{$urlQuery}";
     }
+
+    public function GetBaseFilename($url) {
+        if($url == "/")
+            return $url;
+        $parsedUrl = parse_url($url);
+        if (!isset($parsedUrl["path"])) {
+            return "";
+        }
+        $path = $parsedUrl["path"];
+        $pathParts = explode("/", $path);
+        $filename = end($pathParts);
+        return $filename;
+    }
 }
 
 class Response {
@@ -386,6 +411,15 @@ class Response {
         $this->SetSeoKeywords();
         $this->SetSeoDescription();
         $this->SetMenuTitle();
+    }
+
+    public function SetWebsiteTitle($title = "") {
+        $GLOBALS["XHB2"]["Website"]["Title"] = $title;
+        return true;
+    }
+
+    public function GetWebsiteTitle() {
+        return $GLOBALS["XHB2"]["Website"]["Title"];
     }
 
     public function SetSeoTitle($title = "") {
@@ -500,6 +534,16 @@ class File {
     }
 }
 
+class Common {
+
+    function ExtractAllImageSources($content) {
+        $pattern = '/<img\s+[^>]*src\s*=\s*["\']?([^"\'<>\s]+)["\']?[^>]*>/i';
+        preg_match_all($pattern, $content, $matches);
+        return array_filter($matches[1]);
+    }
+
+}
+
 class Cookie {
 
     public static function Instance() {
@@ -507,6 +551,8 @@ class Cookie {
     }
 
     public function Set($key, $val, $time) {
+        if($time == 0)
+            return static::create($key, $val, 0);
         return static::create($key, $val, time() + $time);
     }
 
@@ -522,7 +568,7 @@ class Cookie {
             setcookie($key, $val, $time, $path, $domain);
             return true;
         }
-        setcookie($key, $val, time() + $time, $path);
+        setcookie($key, $val, $time, $path);
         return true;
     }
 
@@ -1009,21 +1055,32 @@ class Session {
 }
 
 class Application{
+    private $m_DefaultArray;
+
+    public function __construct(){
+        $this->m_DefaultArray = ["/", "index.php", "default.php", "index.html", "default.html"];
+    }
+
+    public function SetDefaultLanguage($defaultLanguage) {
+        $GLOBALS["XHB2"]["DefaultLanguage"] = $defaultLanguage;
+    }
+
+    public function SetLanguage($defaultLanguage){
+        $cookie = new \XHB2\Cookie();
+        $cookie->Set("XHB2Language", $defaultLanguage, 0);
+    }
+
+    public function GetLanguage(){
+        $cookie = new \XHB2\Cookie();
+        $constLanguage = $cookie->Get("XHB2Language");
+        if($constLanguage == null)
+            return $GLOBALS["XHB2"]["DefaultLanguage"];
+        return $constLanguage;
+    }
 
     public function Run(){
         set_error_handler([$this, "ErrorHandler"]);
         set_exception_handler([$this, "ExceptionHandler"]);
-        $uri = explode("XHB2", $_SERVER["REQUEST_URI"]);
-        if(count($uri) != 1)
-            return Error("路由参数不正确");
-        $requestUri = explode("-", $uri[0]);
-        if(count($requestUri) < 4)
-            return Error("模块参数有误");
-        $requestUri[0] = str_replace("/?","",$requestUri[0]);
-        $constLanguage = $requestUri[0];
-        $constModule = $requestUri[1];
-        $constController = "\\App\\Controller\\{$constModule}\\{$requestUri[2]}Controller";
-        $constMethod = $requestUri[3];
         spl_autoload_register(function($className) {
             if (strpos($className, "Model") !== false) {
                 $className = str_replace("//", "/", str_replace("\\", "/", preg_replace("/Model$/", "", $className)));
@@ -1038,6 +1095,36 @@ class Application{
                     require_once($filename);
             }
         });
+        $uri = explode("XHB2", $_SERVER["REQUEST_URI"]);
+        if(count($uri) != 1)
+            return Error("路由参数不正确");
+        $requestUri = explode("-", $uri[0]);
+        if(count($requestUri) == 0)
+            return Error("模块参数有误");
+        if(count($requestUri) < 4){
+            $request = new Request();
+            $baseUrl = $request->GetBaseFilename($requestUri[0]);
+            if(in_array($baseUrl, $this->m_DefaultArray)){
+                $constModule = "Web";
+                $constController = "\\App\\Controller\\Web\\HomeController";
+                $constMethod = "Index";
+                $constLanguage = $this->GetLanguage();
+            }else{
+                return Error("默认模块有误");
+            }
+        }else{
+            $requestUri[0] = str_replace("/?","",$requestUri[0]);
+            $constLanguage = $requestUri[0];
+            $constModule = $requestUri[1];
+            $constController = "\\App\\Controller\\{$constModule}\\{$requestUri[2]}Controller";
+            $constMethod = $requestUri[3];
+            if(strpos($requestUri[3], "&") !== false){
+                $constMethodAnd = explode("&", $requestUri[3]);
+                $constMethod = $constMethodAnd[0];
+            }
+            if($this->GetLanguage() != $constLanguage)
+                $this->SetLanguage($constLanguage);
+        }
         try{
             $controller = new $constController();
             if (!is_object($controller)) {
@@ -1054,7 +1141,13 @@ class Application{
             $request->m_ParamGet = $requestUri;
             $request->m_ParamPost = count($_POST)>0?$_POST:[];
             $request->m_Translate = $constLanguage;
+            if(method_exists($controller, "Befor")) {
+                $controller->Befor($request);
+            }
             call_user_func_array([$controller, $constMethod], [$request]);
+            if(method_exists($controller, "After")) {
+                $controller->After($request);
+            }
         } catch (\Exception $ex) {
             throw new \Exception($ex->getMessage());
         }
@@ -1084,14 +1177,14 @@ class Application{
         return str_replace(rootPath(), "", $message);
     }
 
-    function ErrorHandler($errno, $errstr, $errfile, $errline) {
+    public function ErrorHandler($errno, $errstr, $errfile, $errline) {
         if (error_reporting() === 0) {
             return false;
         }
         throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
     }
 
-    function ExceptionHandler($exception) {
+    public function ExceptionHandler($exception) {
         http_response_code(500);
         $message = "<br />错误: " . $exception->getMessage() . " 在文件 " . $exception->getFile() . " 第 " . $exception->getLine() . " 行";
         Error($message);
